@@ -4884,7 +4884,7 @@
 		} 
 		#paperarea .artwallet .btcprivwif  
 		{
-		    position: absolute; top: 236px; left: 346px; z-index: 100; font-size: 7px; background-color: transparent;
+		    position: absolute; top: 236px; left: 346px; z-index: 100; font-size: 6px; background-color: transparent;
 		    font-weight:bold; color: #000000; margin: 0;  
 				-webkit-transform-origin:top left; -webkit-transform:rotate(-90deg);
 				-moz-transform-origin:top left;    -moz-transform:rotate(-90deg);
@@ -5041,10 +5041,12 @@
 
 			<div id="paperarea">
 				<div id="papercommands" class="commands">
+					<span><label id="paperlabelBIPpassphrase">Passphrase:</label> <input type="text" id="paperpassphrase" /></span>
+					<span><label id="paperlabelencrypt">Encrypt</label> <input type="checkbox" id="paperencrypt" onchange="ninja.wallets.paperwallet.toggleEncrypt(this);" /></span>
 					<span><label id="paperlabelhideart">Hide Art?</label> <input type="checkbox" id="paperart" onchange="ninja.wallets.paperwallet.toggleArt(this);" /></span>
 					<span><label id="paperlabeladdressesperpage">Addresses per page:</label> <input type="text" id="paperlimitperpage" /></span>
 					<span><label id="paperlabeladdressestogenerate">Addresses to generate:</label> <input type="text" id="paperlimit" /></span>
-					<span><input type="button" id="papergenerate" value="Generate" onclick="ninja.wallets.paperwallet.build(document.getElementById('paperlimit').value * 1, document.getElementById('paperlimitperpage').value * 1, !document.getElementById('paperart').checked);" /></span>
+					<span><input type="button" id="papergenerate" value="Generate" onclick="ninja.wallets.paperwallet.build(document.getElementById('paperlimit').value * 1, document.getElementById('paperlimitperpage').value * 1, !document.getElementById('paperart').checked, document.getElementById('paperpassphrase').value);" /></span>
 					<span class="print"><input type="button" name="print" value="Print" id="paperprint" onclick="window.print();" /></span>
 				</div>
 				<div id="paperkeyarea"></div>
@@ -5478,6 +5480,39 @@
 					});
 				}
 
+			},
+			BIP38ByteArrayToEncryptedKeyAsync: function (base58Key, passphrase, callback) {
+				var privKeyBytes = ninja.privateKey.anyPrivateKeyToByteArray(base58Key);
+
+				var privKey = new Bitcoin.ECKey(privKeyBytes);
+				var address = privKey.getBitcoinAddress();
+
+				// compute sha256(sha256(privKey)) and take first 4 bytes
+				var salt = Bitcoin.Util.dsha256(address).slice(0, 4);
+
+				// derive key using scrypt
+				var AES_opts = {mode: new Crypto.mode.ECB(Crypto.pad.NoPadding), asBytes: true};
+
+				Crypto_scrypt(passphrase, salt, 16384, 8, 8, 64, function(derivedBytes) {
+					for(var i = 0; i < 32; ++i) {
+						privKeyBytes[i] ^= derivedBytes[i];
+					}
+
+					var encryptedKey = [];
+
+					// 0x01 0x42 + flagbyte + salt + encryptedhalf1 + encryptedhalf2
+					encryptedKey[0] = 0x01;
+					encryptedKey[1] = 0x42;
+					encryptedKey[2] = 0xc0;
+					encryptedKey[3] = salt[0]; encryptedKey[4] = salt[1];
+					encryptedKey[5] = salt[2]; encryptedKey[6] = salt[3];
+
+					var encryptedKey = encryptedKey.concat(Crypto.AES.encrypt(privKeyBytes, derivedBytes.slice(32), AES_opts));
+
+					encryptedKey = encryptedKey.concat(Bitcoin.Util.dsha256(encryptedKey).slice(0,4));
+
+					callback(Bitcoin.Base58.encode(encryptedKey));
+				});
 			}
 		};
 
@@ -5713,6 +5748,7 @@
 					"testneteditionactivated": "TESTNET EDITION ACTIVATED",
 					"paperlabelbitcoinaddress": "Bitcoin Address:",
 					"paperlabelprivatekey": "Private Key (Wallet Import Format):",
+					"paperlabelencryptedkey": "Encrypted Private Key (Password required)",
 					"bulkgeneratingaddresses": "Generating addresses... ",
 					"brainalertpassphrasetooshort": "The passphrase you entered is too short.\n\nWarning: Choosing a strong passphrase is important to avoid brute force attempts to guess your passphrase and steal your bitcoins.",
 					"brainalertpassphrasedoesnotmatch": "The passphrase does not match the confirm passphrase.",
@@ -5732,6 +5768,7 @@
 					"testneteditionactivated": "TESTNET EDITION ACTIVATED", //TODO: please translate
 					"paperlabelbitcoinaddress": "Dirección Bitcoin:",
 					"paperlabelprivatekey": "Clave privada (formato para importar):",
+					"paperlabelencryptedkey": "Clave privada cifrada (contraseña necesaria)",
 					"bulkgeneratingaddresses": "Generating addresses... ", //TODO: please translate
 					"brainalertpassphrasetooshort": "La contraseña introducida es demasiado corta.\n\nAviso: Es importante escoger una contraseña fuerte para evitar ataques de fuerza bruta a fin de adivinarla y robar tus bitcoins.",
 					"brainalertpassphrasedoesnotmatch": "Las contraseñas no coinciden.",
@@ -5905,7 +5942,10 @@
 					limitElement.value = pageBreakAt;
 				}
 				if (document.getElementById("paperkeyarea").innerHTML == "") {
-					ninja.wallets.paperwallet.build(pageBreakAt, pageBreakAt, !document.getElementById('paperart').checked);
+					document.getElementById("paperpassphrase").disabled = true;
+					document.getElementById("paperencrypt").checked = false;
+					ninja.wallets.paperwallet.encrypt = false;
+					ninja.wallets.paperwallet.build(pageBreakAt, pageBreakAt, !document.getElementById('paperart').checked, document.getElementById('paperpassphrase').value);
 				}
 			},
 
@@ -5921,12 +5961,13 @@
 			useArtisticWallet: true,
 			pageBreakAt: null,
 
-			build: function (numWallets, pageBreakAt, useArtisticWallet) {
+			build: function (numWallets, pageBreakAt, useArtisticWallet, passphrase) {
 				if (numWallets < 1) numWallets = 1;
 				ninja.wallets.paperwallet.remaining = numWallets;
 				ninja.wallets.paperwallet.count = 0;
 				ninja.wallets.paperwallet.useArtisticWallet = useArtisticWallet;
 				ninja.wallets.paperwallet.pageBreakAt = pageBreakAt;
+				ninja.wallets.paperwallet.passphrase = passphrase;
 				document.getElementById("paperkeyarea").innerHTML = "";
 				setTimeout(ninja.wallets.paperwallet.batch, 0);
 			},
@@ -5972,15 +6013,35 @@
 				var key = new Bitcoin.ECKey(false);
 				var bitcoinAddress = key.getBitcoinAddress();
 				var privateKeyWif = key.getBitcoinWalletImportFormat();
-				if (ninja.wallets.paperwallet.useArtisticWallet) {
-					ninja.wallets.paperwallet.showArtisticWallet(idPostFix, bitcoinAddress, privateKeyWif);
+
+				if(document.getElementById("paperencrypt").checked) {
+					ninja.privateKey.BIP38ByteArrayToEncryptedKeyAsync(privateKeyWif, ninja.wallets.paperwallet.passphrase, function(encryptedKey) {
+						if (ninja.wallets.paperwallet.useArtisticWallet) {
+							ninja.wallets.paperwallet.showArtisticWallet(idPostFix, bitcoinAddress, encryptedKey);
+						}
+						else {
+							ninja.wallets.paperwallet.showWallet(idPostFix, bitcoinAddress, encryptedKey);
+						}
+						document.getElementById("busyblock").className = "";
+					});
+					document.getElementById("busyblock").className = "busy";
 				}
 				else {
-					ninja.wallets.paperwallet.showWallet(idPostFix, bitcoinAddress, privateKeyWif);
+					if (ninja.wallets.paperwallet.useArtisticWallet) {
+						ninja.wallets.paperwallet.showArtisticWallet(idPostFix, bitcoinAddress, privateKeyWif);
+					}
+					else {
+						ninja.wallets.paperwallet.showWallet(idPostFix, bitcoinAddress, privateKeyWif);
+					}
 				}
 			},
 
 			templateHtml: function (i) {
+				var privateKeyLabel = ninja.translator.get("paperlabelprivatekey");
+				if(ninja.wallets.paperwallet.encrypt) {
+					privateKeyLabel = ninja.translator.get("paperlabelencryptedkey");
+				}
+
 				var walletHtml =
 							"<div class='public'>" +
 								"<div id='qrcode_public" + i + "' class='qrcode_public'></div>" +
@@ -5992,7 +6053,7 @@
 							"<div class='private'>" +
 								"<div id='qrcode_private" + i + "' class='qrcode_private'></div>" +
 								"<div class='privwif'>" +
-									"<span class='label'>" + ninja.translator.get("paperlabelprivatekey") + "</span>" +
+									"<span class='label'>" + privateKeyLabel + "</span>" +
 									"<span class='output' id='btcprivwif" + i + "'></span>" +
 								"</div>" +
 							"</div>";
@@ -6056,6 +6117,12 @@
 					document.getElementById("paperlimitperpage").value = ninja.wallets.paperwallet.pageBreakAtDefault;
 					document.getElementById("paperlimit").value = ninja.wallets.paperwallet.pageBreakAtDefault;
 				}
+			},
+
+			toggleEncrypt: function(element) {
+				// enable/disable passphrase textbox
+				document.getElementById("paperpassphrase").disabled = !element.checked;
+				ninja.wallets.paperwallet.encrypt = element.checked;
 			}
 		};
 	</script>
